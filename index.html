@@ -154,7 +154,6 @@
             font-size: 70px; 
             margin-bottom: 40px;
             display: block;
-            /* UPDATED: Gold Metallic Gradient */
             background: linear-gradient(to bottom, #DBA514 0%, #FFEE88 25%, #D4AF37 50%, #FFEE88 75%, #CC9900 100%);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
@@ -204,7 +203,7 @@
     <script>
         // --- Configuration ---
         const CHUNK_SIZE = 16;
-        const RENDER_DISTANCE = 3; 
+        const RENDER_DISTANCE = 3; // Keep this small for performance
         const WORLD_DEPTH = 50; 
         
         const PLAYER_HEIGHT = 1.75;
@@ -366,11 +365,10 @@
 
         // --- Particles ---
         function createParticles(pos, color) {
-            const particleCount = 6; // Reduced count slightly for performance
+            const particleCount = 5; // Reduced count for performance
             const material = new THREE.MeshBasicMaterial({ color: color });
 
             for (let i = 0; i < particleCount; i++) {
-                // Use Shared Geometry
                 const mesh = new THREE.Mesh(sharedParticleGeometry, material);
                 mesh.position.copy(pos).add(new THREE.Vector3(
                     (Math.random() - 0.5) * 0.5,
@@ -401,7 +399,6 @@
 
                 if (p.life <= 0) {
                     scene.remove(p.mesh);
-                    // DO NOT Dispose shared geometry
                     particles.splice(i, 1);
                 }
             }
@@ -605,17 +602,27 @@
         // --- Core Block Logic ---
         
         function createBlock(x, y, z, type, renderNow = true) {
-            const entry = { type: type, mesh: null };
-            worldData.set(getBlockKey(x, y, z), entry);
-            if (renderNow) {
-                renderBlock(x, y, z, entry);
+            const key = getBlockKey(x, y, z);
+            
+            // FIX: Check if a block already exists here to prevent "Ghost Blocks"
+            if (worldData.has(key)) {
+                const oldEntry = worldData.get(key);
+                if (oldEntry.mesh && oldEntry.mesh.parent) {
+                    oldEntry.mesh.parent.remove(oldEntry.mesh);
+                }
             }
+
+            const entry = { type: type, mesh: null };
+            worldData.set(key, entry);
+            if (renderNow) {
+                return renderBlock(x, y, z, entry);
+            }
+            return null;
         }
 
         function renderBlock(x, y, z, entry) {
-            if (entry.mesh) return; 
+            if (entry.mesh) return entry.mesh; 
 
-            // Optimization: Use Shared Geometry
             const mesh = new THREE.Mesh(sharedBlockGeometry, materials[entry.type]);
             mesh.position.set(x, y, z);
             
@@ -631,6 +638,7 @@
             else blockGroup.add(mesh);
             
             entry.mesh = mesh;
+            return mesh;
         }
 
         function revealNeighbors(x, y, z) {
@@ -669,14 +677,16 @@
                              else if (getTerrainHeight(x, z-1) < y) exposed = true;
                         }
 
-                        createBlock(x, y, z, type, exposed);
+                        const mesh = createBlock(x, y, z, type, exposed);
+                        if (mesh) chunkBlocks.push(mesh);
                     }
 
                     if (Math.abs(x * 37 + z * 13) % 100 < 2) {
-                        createTree(x, h + 1, z);
+                        createTree(x, h + 1, z); // Simplified trees, just add to data/scene, no dedicated tracking
                     }
                 }
             }
+            return chunkBlocks;
         }
 
         function createTree(x, y, z) {
@@ -707,9 +717,28 @@
                     const key = `${x},${z}`;
                     activeKeys.add(key);
                     if (!chunks.has(key)) {
-                        chunks.set(key, true); 
-                        generateChunk(x, z);
+                        const newBlocks = generateChunk(x, z);
+                        chunks.set(key, newBlocks);
                     }
+                }
+            }
+            
+            // Garbage collection for chunks
+            for (const [key, blocks] of chunks) {
+                if (!activeKeys.has(key)) {
+                    if (Array.isArray(blocks)) {
+                        blocks.forEach(block => {
+                            if (block && block.parent) {
+                                block.parent.remove(block);
+                                // Also remove from worldData to prevent infinite memory growth
+                                const bx = block.position.x;
+                                const by = block.position.y;
+                                const bz = block.position.z;
+                                worldData.delete(getBlockKey(bx, by, bz));
+                            }
+                        });
+                    }
+                    chunks.delete(key);
                 }
             }
             
@@ -889,14 +918,20 @@
                     // Particles
                     createParticles(intersect.object.position, intersect.object.material.color || intersect.object.material[2].color || 0x888888);
 
-                    // Logic
+                    // FIX: Guaranteed removal of the object clicked
+                    const clickedMesh = intersect.object;
+                    if (clickedMesh.parent) {
+                        clickedMesh.parent.remove(clickedMesh);
+                    }
+
+                    // Logic: Clear data
                     const entry = getBlockData(bx, by, bz);
-                    if (entry && entry.mesh) {
-                        // Remove mesh
-                        if (entry.mesh.parent) entry.mesh.parent.remove(entry.mesh);
-                        // DO NOT dispose geometry as it is shared
-                        entry.mesh = null;
-                        worldData.delete(getBlockKey(bx, by, bz)); // Fully delete from data so we can walk there
+                    if (entry) {
+                        // If there was a data mismatch and the entry points to a DIFFERENT mesh, clean that up too
+                        if (entry.mesh && entry.mesh !== clickedMesh && entry.mesh.parent) {
+                             entry.mesh.parent.remove(entry.mesh);
+                        }
+                        worldData.delete(getBlockKey(bx, by, bz)); 
                     }
                     
                     // Reveal hidden blocks behind this one
@@ -949,8 +984,12 @@
                 // New Darkness Logic:
                 // Starts fading at Y=4 (just below average surface peaks)
                 // Reaches maximum darkness at Y=-12 (very shallow cave)
-                let depthFactor = (playerY - 4) / -16; 
-                depthFactor = Math.max(0, Math.min(1, depthFactor)); 
+                let depthFactor = 0;
+                // Only darken if BELOW surface level
+                if (playerY < 4) {
+                    depthFactor = (playerY - 4) / -16; 
+                    depthFactor = Math.max(0, Math.min(1, depthFactor)); 
+                }
 
                 // Target darkness is 96% (almost pitch black)
                 const brightness = 1.0 - (depthFactor * 0.96);
