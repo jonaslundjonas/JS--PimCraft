@@ -160,6 +160,32 @@
             animation: rotateLogo 6s infinite ease-in-out;
             filter: drop-shadow(4px 4px 0px #000);
         }
+        
+        .menu-btn {
+            background: #555;
+            border: 2px solid #fff;
+            color: white;
+            font-family: 'Press Start 2P', cursive;
+            padding: 10px 20px;
+            margin: 10px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .menu-btn:hover {
+            background: #777;
+            transform: scale(1.05);
+        }
+        
+        #menu-actions {
+            margin-top: 20px;
+            display: flex;
+            gap: 10px;
+        }
+        
+        /* Hide file input */
+        #file-input {
+            display: none;
+        }
 
         @keyframes rotateLogo {
             0% { transform: rotateY(-20deg); }
@@ -183,9 +209,18 @@
             <p>Left Click to Mine</p>
             <p>Right Click to Place</p>
             <p>Scroll to Select Block</p>
+            
+            <div id="menu-actions">
+                <button class="menu-btn" id="newBtn">New World</button>
+                <button class="menu-btn" id="saveBtn">Save World</button>
+                <button class="menu-btn" id="loadBtn">Load World</button>
+            </div>
         </div>
         <div id="credits">created by Jonas - 2025</div>
     </div>
+
+    <!-- Hidden file input for loading -->
+    <input type="file" id="file-input" accept=".pimcraft">
 
     <div id="crosshair"></div>
     
@@ -203,7 +238,7 @@
     <script>
         // --- Configuration ---
         const CHUNK_SIZE = 16;
-        const RENDER_DISTANCE = 3; // Keep this small for performance
+        const RENDER_DISTANCE = 3; 
         const WORLD_DEPTH = 50; 
         
         const PLAYER_HEIGHT = 1.75;
@@ -225,11 +260,21 @@
         let blockGroup, transparentBlockGroup, pickaxeGroup;
         let ambientLight, dirLight; 
         
+        // World Generation Seed & Mod Store
+        let seedOffset = { x: 0, z: 0 };
+        const chunkMods = new Map();
+
         let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
         let moveUp = false, moveDown = false;
         let canJump = false, isFlying = false;
+        
+        // Action States
+        let isLeftMouseDown = false;
+        let isRightMouseDown = false;
         let isMining = false; 
         let miningTimer = 0;
+        let actionCooldown = 0;
+        const ACTION_DELAY = 0.25; 
         
         let prevTime = performance.now();
         const velocity = new THREE.Vector3();
@@ -260,10 +305,21 @@
         function initControls() {
             const blocker = document.getElementById('blocker');
             const instructions = document.getElementById('instructions');
+            const newBtn = document.getElementById('newBtn');
+            const saveBtn = document.getElementById('saveBtn');
+            const loadBtn = document.getElementById('loadBtn');
+            const fileInput = document.getElementById('file-input');
 
-            instructions.addEventListener('click', function () {
+            // Start Game
+            instructions.addEventListener('click', function (e) {
+                if (e.target.tagName === 'BUTTON') return;
                 document.body.requestPointerLock();
             });
+            
+            newBtn.addEventListener('click', newGame);
+            saveBtn.addEventListener('click', saveGame);
+            loadBtn.addEventListener('click', () => { fileInput.click(); });
+            fileInput.addEventListener('change', loadGame);
 
             document.addEventListener('pointerlockchange', function () {
                 if (document.pointerLockElement === document.body) {
@@ -314,6 +370,124 @@
                 selectBlock(currentBlockIndex);
             });
         }
+        
+        // --- Save & Load Logic ---
+        function newGame() {
+            seedOffset.x = Math.floor(Math.random() * 100000);
+            seedOffset.z = Math.floor(Math.random() * 100000);
+            chunkMods.clear();
+            resetWorld();
+            alert("New World Generated!");
+        }
+
+        function resetWorld() {
+            // 1. Clear visuals
+            while(blockGroup.children.length > 0){ 
+                const mesh = blockGroup.children[0];
+                blockGroup.remove(mesh);
+            }
+            while(transparentBlockGroup.children.length > 0){
+                const mesh = transparentBlockGroup.children[0];
+                transparentBlockGroup.remove(mesh);
+            }
+            
+            // 2. Clear Data
+            worldData.clear();
+            chunks.clear();
+            particles.length = 0; 
+
+            // 3. Reset Player
+            controls.getObject().position.set(0, 20, 0);
+            controls.getObject().rotation.set(0,0,0);
+            controls.getPitch().rotation.set(0,0,0);
+            velocity.set(0,0,0);
+            
+            // 4. Force Regen
+            currentChunk = { x: -999, z: -999 }; 
+            updateChunks();
+        }
+
+        function saveGame() {
+            // Prepare chunk modifications for saving
+            const modsToSave = {};
+            for(const [chunkKey, modMap] of chunkMods.entries()) {
+                modsToSave[chunkKey] = Array.from(modMap.entries()); // Save as array of [key, type]
+            }
+
+            const saveData = {
+                version: 2, 
+                seed: seedOffset,
+                player: {
+                    position: controls.getObject().position,
+                    rotation: {
+                        y: controls.getObject().rotation.y,
+                        x: controls.getPitch().rotation.x
+                    }
+                },
+                mods: modsToSave // We ONLY save modifications (and Air blocks for caves)
+            };
+
+            const blob = new Blob([JSON.stringify(saveData)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `world-${Date.now()}.pimcraft`;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        function loadGame(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const data = JSON.parse(e.target.result);
+                    restoreState(data);
+                } catch (err) {
+                    alert("Failed to load map: Invalid file format");
+                    console.error(err);
+                }
+            };
+            reader.readAsText(file);
+            event.target.value = ''; 
+        }
+
+        function restoreState(data) {
+            // 1. Clear
+            chunkMods.clear();
+            while(blockGroup.children.length > 0) blockGroup.remove(blockGroup.children[0]);
+            while(transparentBlockGroup.children.length > 0) transparentBlockGroup.remove(transparentBlockGroup.children[0]);
+            worldData.clear();
+            chunks.clear();
+            particles.length = 0;
+
+            // 2. Restore Seed
+            if (data.seed) seedOffset = data.seed;
+            else seedOffset = { x: 0, z: 0 };
+
+            // 3. Restore Modifications
+            if (data.mods) {
+                for (const key in data.mods) {
+                    chunkMods.set(key, new Map(data.mods[key]));
+                }
+            }
+
+            // 4. Restore Player
+            if (data.player) {
+                controls.getObject().position.copy(data.player.position);
+                controls.getObject().rotation.y = data.player.rotation.y;
+                controls.getPitch().rotation.x = data.player.rotation.x;
+                velocity.set(0,0,0);
+            }
+            
+            // 5. Regen (The engine will naturally apply mods during generation)
+            currentChunk = { x: -999, z: -999 };
+            updateChunks();
+            
+            alert("World Loaded Successfully!");
+        }
 
         // --- Pickaxe ---
         function initPickaxe() {
@@ -344,6 +518,7 @@
         }
 
         function animatePickaxe(delta) {
+            // Check start condition logic moved to updateContinuousActions or events
             if (isMining) {
                 miningTimer += delta * 25; 
                 
@@ -355,10 +530,15 @@
                 pickaxeGroup.position.y = -0.4 - swing * 0.2;
                 
                 if (miningTimer > Math.PI) {
-                    isMining = false;
-                    miningTimer = 0;
-                    pickaxeGroup.position.set(0.5, -0.4, -0.8);
-                    pickaxeGroup.rotation.set(0, -0.2, 0.2);
+                    // Loop if button held, else stop
+                    if (isLeftMouseDown) {
+                        miningTimer = 0;
+                    } else {
+                        isMining = false;
+                        miningTimer = 0;
+                        pickaxeGroup.position.set(0.5, -0.4, -0.8);
+                        pickaxeGroup.rotation.set(0, -0.2, 0.2);
+                    }
                 }
             }
         }
@@ -593,10 +773,25 @@
         }
 
         function getTerrainHeight(x, z) {
-            const h1 = (Math.sin(x / 25) * Math.cos(z / 25)) * 6;
-            const h2 = (Math.sin(x / 8) * Math.cos(z / 8)) * 2;
-            const h3 = (Math.sin(x / 2) * Math.sin(z / 3)) * 0.5;
+            const sx = x + seedOffset.x;
+            const sz = z + seedOffset.z;
+            const h1 = (Math.sin(sx / 25) * Math.cos(sz / 25)) * 6;
+            const h2 = (Math.sin(sx / 8) * Math.cos(sz / 8)) * 2;
+            const h3 = (Math.sin(sx / 2) * Math.sin(sz / 3)) * 0.5;
             return Math.floor(h1 + h2 + h3);
+        }
+
+        // --- Mod Logic ---
+        function getChunkKeyFromCoords(x, z) {
+            const cx = Math.floor(x / CHUNK_SIZE);
+            const cz = Math.floor(z / CHUNK_SIZE);
+            return `${cx},${cz}`;
+        }
+        
+        function recordModification(x, y, z, type) {
+            const chunkKey = getChunkKeyFromCoords(x, z);
+            if (!chunkMods.has(chunkKey)) chunkMods.set(chunkKey, new Map());
+            chunkMods.get(chunkKey).set(`${x},${y},${z}`, type);
         }
 
         // --- Core Block Logic ---
@@ -604,7 +799,6 @@
         function createBlock(x, y, z, type, renderNow = true) {
             const key = getBlockKey(x, y, z);
             
-            // FIX: Check if a block already exists here to prevent "Ghost Blocks"
             if (worldData.has(key)) {
                 const oldEntry = worldData.get(key);
                 if (oldEntry.mesh && oldEntry.mesh.parent) {
@@ -656,47 +850,113 @@
             const chunkBlocks = []; 
             const startX = cx * CHUNK_SIZE;
             const startZ = cz * CHUNK_SIZE;
+            
+            const chunkKey = `${cx},${cz}`;
+            const mods = chunkMods.get(chunkKey);
+
+            // Helper to check transparency/air in neighbors (for visibility culling)
+            // Returns true if the block at nx,ny,nz is Air (either naturally or via mod)
+            const isTransparent = (nx, ny, nz) => {
+                // 1. Check mods first
+                const nCk = getChunkKeyFromCoords(nx, nz);
+                if (chunkMods.has(nCk)) {
+                    const nm = chunkMods.get(nCk);
+                    const nk = `${nx},${ny},${nz}`;
+                    if (nm.has(nk)) {
+                         const t = nm.get(nk);
+                         if (t === 'air' || t === 'glass') return true;
+                         return false; // It is a solid block mod
+                    }
+                }
+                
+                // 2. Check natural generation
+                const nh = getTerrainHeight(nx, nz);
+                if (ny > nh) return true; // Naturally air
+                return false; // Naturally stone/dirt
+            };
 
             for (let x = startX; x < startX + CHUNK_SIZE; x++) {
                 for (let z = startZ; z < startZ + CHUNK_SIZE; z++) {
                     const h = getTerrainHeight(x, z);
                     
+                    // 1. Generate Terrain
                     for (let y = h; y >= -WORLD_DEPTH; y--) {
+                        const blockKey = `${x},${y},${z}`;
                         let type = 'stone';
+                        
                         if (y === h) type = 'grass';
                         else if (y > h - 4) type = 'dirt';
                         else if (y < -30 && Math.random() < 0.05) type = 'stone_black'; 
                         else if (y < -10 && Math.random() < 0.05) type = 'stone_dark';
 
+                        if (mods && mods.has(blockKey)) {
+                            type = mods.get(blockKey);
+                        }
+
+                        if (type === 'air') continue;
+
+                        // Visibility Culling
                         let exposed = false;
                         if (y === h) exposed = true;
+                        else if (mods && mods.has(blockKey)) exposed = true; // Always show user blocks
                         else {
-                             if (getTerrainHeight(x+1, z) < y) exposed = true;
-                             else if (getTerrainHeight(x-1, z) < y) exposed = true;
-                             else if (getTerrainHeight(x, z+1) < y) exposed = true;
-                             else if (getTerrainHeight(x, z-1) < y) exposed = true;
+                             // Check neighbors for Air (Natural OR Modded)
+                             if (isTransparent(x+1, y, z)) exposed = true;
+                             else if (isTransparent(x-1, y, z)) exposed = true;
+                             else if (isTransparent(x, y, z+1)) exposed = true;
+                             else if (isTransparent(x, y, z-1)) exposed = true;
+                             else if (isTransparent(x, y+1, z)) exposed = true;
+                             else if (isTransparent(x, y-1, z)) exposed = true;
                         }
 
                         const mesh = createBlock(x, y, z, type, exposed);
                         if (mesh) chunkBlocks.push(mesh);
                     }
 
-                    if (Math.abs(x * 37 + z * 13) % 100 < 2) {
-                        createTree(x, h + 1, z); // Simplified trees, just add to data/scene, no dedicated tracking
+                    // 2. Trees
+                    const treeKey = `${x},${h+1},${z}`;
+                    let allowTree = true;
+                    if (mods && mods.has(treeKey) && mods.get(treeKey) !== 'wood') allowTree = false;
+
+                    if (allowTree && Math.abs(x * 37 + z * 13) % 100 < 2) {
+                        createTree(x, h + 1, z, mods);
                     }
                 }
             }
+            
+            // 3. Create User-Added Blocks OUTSIDE the terrain loop
+            if (mods) {
+                for (const [blockKey, type] of mods) {
+                    if (type === 'air') continue;
+                    if (!worldData.has(blockKey)) {
+                        const [bx, by, bz] = blockKey.split(',').map(Number);
+                        if (Math.floor(bx/CHUNK_SIZE) === cx && Math.floor(bz/CHUNK_SIZE) === cz) {
+                            const mesh = createBlock(bx, by, bz, type, true);
+                            if (mesh) chunkBlocks.push(mesh);
+                        }
+                    }
+                }
+            }
+
             return chunkBlocks;
         }
 
-        function createTree(x, y, z) {
+        function createTree(x, y, z, mods) {
+            const check = (bx, by, bz, type) => {
+                const k = `${bx},${by},${bz}`;
+                if (mods && mods.has(k)) {
+                    if (mods.get(k) === 'air') return; 
+                }
+                createBlock(bx, by, bz, type, true);
+            };
+
             const height = 3 + (Math.abs(x * z) % 3);
-            for (let i = 0; i < height; i++) createBlock(x, y + i, z, 'wood', true);
+            for (let i = 0; i < height; i++) check(x, y + i, z, 'wood');
             for (let lx = -2; lx <= 2; lx++) {
                 for (let ly = 0; ly <= 2; ly++) {
                     for (let lz = -2; lz <= 2; lz++) {
                         if (Math.abs(lx) + Math.abs(ly) + Math.abs(lz) > 3) continue;
-                        createBlock(x + lx, y + height - 1 + ly, z + lz, 'leaves', true);
+                        check(x + lx, y + height - 1 + ly, z + lz, 'leaves');
                     }
                 }
             }
@@ -723,14 +983,13 @@
                 }
             }
             
-            // Garbage collection for chunks
+            // Garbage collection
             for (const [key, blocks] of chunks) {
                 if (!activeKeys.has(key)) {
                     if (Array.isArray(blocks)) {
                         blocks.forEach(block => {
                             if (block && block.parent) {
                                 block.parent.remove(block);
-                                // Also remove from worldData to prevent infinite memory growth
                                 const bx = block.position.x;
                                 const by = block.position.y;
                                 const bz = block.position.z;
@@ -829,7 +1088,11 @@
             
             document.addEventListener('keydown', onKeyDown);
             document.addEventListener('keyup', onKeyUp);
-            document.addEventListener('mousedown', onMouseClick);
+            
+            // REPLACED Click with MouseDown/Up for continuous action
+            document.addEventListener('mousedown', onMouseDown);
+            document.addEventListener('mouseup', onMouseUp);
+            
             window.addEventListener('resize', onWindowResize);
             
             selectBlock(0);
@@ -892,17 +1155,37 @@
             });
         }
 
-        function onMouseClick(event) {
+        function onMouseDown(event) {
             if (!controls.enabled) return;
             
-            // Trigger Pickaxe Animation
             if (event.button === 0) {
-                isMining = true;
-                miningTimer = 0;
+                isLeftMouseDown = true;
+                isMining = true; // Start anim
+                // Instant action if not cooling down
+                if (actionCooldown <= 0) {
+                    performAction(0);
+                    actionCooldown = ACTION_DELAY;
+                }
             }
+            
+            if (event.button === 2) {
+                isRightMouseDown = true;
+                if (actionCooldown <= 0) {
+                    performAction(2);
+                    actionCooldown = ACTION_DELAY;
+                }
+            }
+        }
 
+        function onMouseUp(event) {
+            if (event.button === 0) isLeftMouseDown = false;
+            if (event.button === 2) isRightMouseDown = false;
+        }
+
+        // Consolidated action logic
+        function performAction(button) {
             raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
-            // OPTIMIZATION: Only raycast close objects (already handled by raycaster.far = 8)
+            // Re-fetch objects as scene changes
             const objects = [...blockGroup.children, ...transparentBlockGroup.children];
             const intersections = raycaster.intersectObjects(objects);
 
@@ -914,7 +1197,7 @@
                 const by = intersect.object.position.y;
                 const bz = intersect.object.position.z;
 
-                if (event.button === 0) { // Mine
+                if (button === 0) { // Mine
                     // Particles
                     createParticles(intersect.object.position, intersect.object.material.color || intersect.object.material[2].color || 0x888888);
 
@@ -924,20 +1207,19 @@
                         clickedMesh.parent.remove(clickedMesh);
                     }
 
-                    // Logic: Clear data
+                    // Logic: Clear data and Record Mod
                     const entry = getBlockData(bx, by, bz);
                     if (entry) {
-                        // If there was a data mismatch and the entry points to a DIFFERENT mesh, clean that up too
                         if (entry.mesh && entry.mesh !== clickedMesh && entry.mesh.parent) {
                              entry.mesh.parent.remove(entry.mesh);
                         }
                         worldData.delete(getBlockKey(bx, by, bz)); 
+                        recordModification(bx, by, bz, 'air'); // Record removal
                     }
                     
-                    // Reveal hidden blocks behind this one
                     revealNeighbors(bx, by, bz);
 
-                } else if (event.button === 2) { // Build
+                } else if (button === 2) { // Build
                     const hitBlockPos = intersect.object.position.clone();
                     const newPos = hitBlockPos.add(intersect.face.normal);
                     
@@ -952,8 +1234,22 @@
                     
                     if (!hasBlockData(x, y, z)) {
                         createBlock(x, y, z, currentBlockType, true);
+                        recordModification(x, y, z, currentBlockType); // Record Add
                     }
                 }
+            }
+        }
+        
+        function updateContinuousActions(delta) {
+            if (actionCooldown > 0) actionCooldown -= delta;
+
+            if (isLeftMouseDown && actionCooldown <= 0) {
+                performAction(0);
+                actionCooldown = ACTION_DELAY;
+            }
+            if (isRightMouseDown && actionCooldown <= 0) {
+                performAction(2);
+                actionCooldown = ACTION_DELAY;
             }
         }
 
@@ -974,6 +1270,7 @@
 
             if (controls.enabled) {
                 updateChunks(); 
+                updateContinuousActions(delta); // Handle holding mouse buttons
                 skyMesh.position.copy(controls.getObject().position);
                 animatePickaxe(delta);
                 updateParticles(delta);
