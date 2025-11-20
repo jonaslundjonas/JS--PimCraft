@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PimCraft</title>
+    <title>PimCraft - Survival Mode</title>
     <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
     <style>
         body {
@@ -49,6 +49,51 @@
             pointer-events: none;
             font-size: 12px;
             line-height: 1.5;
+        }
+
+        #health-bar-container {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            width: 200px;
+            height: 20px;
+            background: rgba(0,0,0,0.5);
+            border: 2px solid white;
+            border-radius: 10px;
+        }
+
+        #health-bar {
+            width: 100%;
+            height: 100%;
+            background-color: #ff4444;
+            border-radius: 8px;
+            transition: width 0.2s;
+        }
+
+        #damage-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: radial-gradient(circle, transparent 50%, rgba(255, 0, 0, 0.6) 100%);
+            opacity: 0;
+            transition: opacity 0.1s;
+            pointer-events: none;
+            z-index: 5;
+        }
+        
+        #heal-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: radial-gradient(circle, transparent 50%, rgba(0, 255, 0, 0.4) 100%);
+            opacity: 0;
+            transition: opacity 0.1s;
+            pointer-events: none;
+            z-index: 5;
         }
 
         #toolbar-container {
@@ -198,17 +243,20 @@
 </head>
 <body>
 
+    <div id="damage-overlay"></div>
+    <div id="heal-overlay"></div>
+
     <div id="blocker">
         <div id="instructions">
             <div id="gameTitle">PimCraft</div>
             <p>CLICK TO PLAY</p>
-            <p>WASD to Move</p>
-            <p>SPACE to Jump / Fly Up</p>
-            <p>SHIFT to Fly Down</p>
-            <p>F to Toggle Flight</p>
-            <p>Left Click to Mine</p>
-            <p>Right Click to Place</p>
-            <p>Scroll to Select Block</p>
+            <p>WASD to Move | SPACE to Jump / Ascend</p>
+            <p>F to Fly | SHIFT to Descend</p>
+            <p>Left Click: Mine / Attack</p>
+            <p>Right Click: Place Block</p>
+            <p style="color:#ff8888">HUNT BUNNIES (Attack)</p>
+            <p style="color:#ffff88">CATCH HOT DOGS (Heal)</p>
+            <p style="color:#00ffff">MOBS LOVE GLOWSTONE</p>
             
             <div id="menu-actions">
                 <button class="menu-btn" id="newBtn">New World</button>
@@ -224,11 +272,16 @@
 
     <div id="crosshair"></div>
     
+    <div id="health-bar-container">
+        <div id="health-bar"></div>
+    </div>
+    
     <div id="ui">
         <div>FPS: <span id="fps">0</span></div>
         <div>Block: <span id="blockName">Grass</span></div>
-        <div>Chunks: <span id="chunkCount">0</span></div>
-        <div>Flying: <span id="isFlying">No</span></div>
+        <div>Health: <span id="hp-val">100</span>%</div>
+        <div>Bunnies: <span id="bunny-count">0</span></div>
+        <div>Flying: <span id="fly-status" style="color:yellow">OFF</span></div>
     </div>
 
     <div id="toolbar-container">
@@ -245,11 +298,11 @@
         const PLAYER_RADIUS = 0.3; 
         
         // Movement Physics Tuning (Balanced Pace)
-        const PLAYER_SPEED = 2.3;   
-        const FLY_SPEED = 4.5;      
-        const FLY_ASCEND_SPEED = 5.0; 
-        const FRICTION = 7.0;       
-        const ACCELERATION = 28.0;
+        const PLAYER_SPEED = 4.0; // Slightly faster to outrun bunnies
+        const FLY_SPEED = 10.0;      
+        const FLY_ASCEND_SPEED = 8.0; 
+        const FRICTION = 7.0;        
+        const ACCELERATION = 40.0;
         const PLAYER_JUMP = 15.0; 
         const GRAVITY = 30.0; 
 
@@ -257,12 +310,14 @@
         let camera, scene, renderer;
         let controls;
         let raycaster;
-        let blockGroup, transparentBlockGroup, pickaxeGroup;
+        let blockGroup, transparentBlockGroup, pickaxeGroup, mobGroup;
         let ambientLight, dirLight; 
         
         // World Generation Seed & Mod Store
         let seedOffset = { x: 0, z: 0 };
         const chunkMods = new Map();
+        // New: Track active glowstones for mob AI
+        const activeLights = new Set(); 
 
         let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
         let moveUp = false, moveDown = false;
@@ -280,6 +335,10 @@
         const velocity = new THREE.Vector3();
         const direction = new THREE.Vector3();
 
+        // Player Stats
+        let playerHealth = 100;
+        let lastHitTime = 0;
+
         let currentBlockIndex = 0;
         const blockTypes = [
             'grass', 'dirt', 'stone', 'wood', 'leaves', 
@@ -289,6 +348,13 @@
         const materials = {};
         const particles = []; 
         
+        // Mobs
+        let bunnies = [];
+        const MAX_BUNNIES = 5; 
+        
+        let hotdogs = [];
+        const MAX_HOTDOGS = 2; // Very rare
+
         // Optimization: Shared Geometries
         const sharedBlockGeometry = new THREE.BoxGeometry(1, 1, 1);
         const sharedParticleGeometry = new THREE.BoxGeometry(0.15, 0.15, 0.15);
@@ -377,27 +443,32 @@
             seedOffset.z = Math.floor(Math.random() * 100000);
             chunkMods.clear();
             resetWorld();
-            alert("New World Generated!");
         }
 
         function resetWorld() {
             // 1. Clear visuals
             while(blockGroup.children.length > 0){ 
-                const mesh = blockGroup.children[0];
-                blockGroup.remove(mesh);
+                blockGroup.remove(blockGroup.children[0]);
             }
             while(transparentBlockGroup.children.length > 0){
-                const mesh = transparentBlockGroup.children[0];
-                transparentBlockGroup.remove(mesh);
+                transparentBlockGroup.remove(transparentBlockGroup.children[0]);
+            }
+            while(mobGroup.children.length > 0){
+                mobGroup.remove(mobGroup.children[0]);
             }
             
             // 2. Clear Data
             worldData.clear();
+            activeLights.clear(); // Clear lights
             chunks.clear();
             particles.length = 0; 
+            bunnies = [];
+            hotdogs = [];
+            playerHealth = 100;
+            updateHealthUI();
 
             // 3. Reset Player
-            controls.getObject().position.set(0, 20, 0);
+            controls.getObject().position.set(0, 30, 0);
             controls.getObject().rotation.set(0,0,0);
             controls.getPitch().rotation.set(0,0,0);
             velocity.set(0,0,0);
@@ -405,13 +476,15 @@
             // 4. Force Regen
             currentChunk = { x: -999, z: -999 }; 
             updateChunks();
+            
+            // 5. Spawn Initial Bunnies
+            spawnInitialMobs();
         }
 
         function saveGame() {
-            // Prepare chunk modifications for saving
             const modsToSave = {};
             for(const [chunkKey, modMap] of chunkMods.entries()) {
-                modsToSave[chunkKey] = Array.from(modMap.entries()); // Save as array of [key, type]
+                modsToSave[chunkKey] = Array.from(modMap.entries());
             }
 
             const saveData = {
@@ -424,14 +497,14 @@
                         x: controls.getPitch().rotation.x
                     }
                 },
-                mods: modsToSave // We ONLY save modifications (and Air blocks for caves)
+                mods: modsToSave 
             };
 
             const blob = new Blob([JSON.stringify(saveData)], { type: 'application/json' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = `world-${Date.now()}.pimcraft`;
+            a.download = `pimcraft-world-${Date.now()}.pimcraft`;
             a.click();
             URL.revokeObjectURL(url);
         }
@@ -455,26 +528,26 @@
         }
 
         function restoreState(data) {
-            // 1. Clear
             chunkMods.clear();
             while(blockGroup.children.length > 0) blockGroup.remove(blockGroup.children[0]);
             while(transparentBlockGroup.children.length > 0) transparentBlockGroup.remove(transparentBlockGroup.children[0]);
             worldData.clear();
+            activeLights.clear();
             chunks.clear();
             particles.length = 0;
+            bunnies = [];
+            hotdogs = [];
+            while(mobGroup.children.length > 0) mobGroup.remove(mobGroup.children[0]);
 
-            // 2. Restore Seed
             if (data.seed) seedOffset = data.seed;
             else seedOffset = { x: 0, z: 0 };
 
-            // 3. Restore Modifications
             if (data.mods) {
                 for (const key in data.mods) {
                     chunkMods.set(key, new Map(data.mods[key]));
                 }
             }
 
-            // 4. Restore Player
             if (data.player) {
                 controls.getObject().position.copy(data.player.position);
                 controls.getObject().rotation.y = data.player.rotation.y;
@@ -482,9 +555,9 @@
                 velocity.set(0,0,0);
             }
             
-            // 5. Regen (The engine will naturally apply mods during generation)
             currentChunk = { x: -999, z: -999 };
             updateChunks();
+            spawnInitialMobs(); 
             
             alert("World Loaded Successfully!");
         }
@@ -518,7 +591,6 @@
         }
 
         function animatePickaxe(delta) {
-            // Check start condition logic moved to updateContinuousActions or events
             if (isMining) {
                 miningTimer += delta * 25; 
                 
@@ -530,7 +602,6 @@
                 pickaxeGroup.position.y = -0.4 - swing * 0.2;
                 
                 if (miningTimer > Math.PI) {
-                    // Loop if button held, else stop
                     if (isLeftMouseDown) {
                         miningTimer = 0;
                     } else {
@@ -545,7 +616,7 @@
 
         // --- Particles ---
         function createParticles(pos, color) {
-            const particleCount = 5; // Reduced count for performance
+            const particleCount = 5; 
             const material = new THREE.MeshBasicMaterial({ color: color });
 
             for (let i = 0; i < particleCount; i++) {
@@ -582,6 +653,440 @@
                     particles.splice(i, 1);
                 }
             }
+        }
+
+        // --- MOBS ---
+        
+        // 1. BUNNY
+        function createBunnyMesh() {
+            const group = new THREE.Group();
+            const matWhite = new THREE.MeshLambertMaterial({ color: 0xffffff });
+            const matPink = new THREE.MeshLambertMaterial({ color: 0xffb6c1 });
+            const matRed = new THREE.MeshBasicMaterial({ color: 0xff0000 }); 
+
+            // Body
+            const body = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.4, 0.6), matWhite);
+            body.position.y = 0.2;
+            group.add(body);
+            // Head
+            const head = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.35, 0.35), matWhite);
+            head.position.set(0, 0.5, 0.3);
+            group.add(head);
+            // Ears
+            const earGeo = new THREE.BoxGeometry(0.08, 0.4, 0.1);
+            const earL = new THREE.Mesh(earGeo, matWhite);
+            earL.position.set(0.1, 0.8, 0.3);
+            group.add(earL);
+            const earInner = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.3, 0.05), matPink);
+            earInner.position.set(0.1, 0.8, 0.33);
+            group.add(earInner);
+            const earR = new THREE.Mesh(earGeo, matWhite);
+            earR.position.set(-0.1, 0.8, 0.3);
+            group.add(earR);
+            const earInnerR = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.3, 0.05), matPink);
+            earInnerR.position.set(-0.1, 0.8, 0.33);
+            group.add(earInnerR);
+            // Eyes
+            const eyeGeo = new THREE.PlaneGeometry(0.08, 0.08);
+            const eyeL = new THREE.Mesh(eyeGeo, matRed);
+            eyeL.position.set(0.08, 0.55, 0.48);
+            group.add(eyeL);
+            const eyeR = new THREE.Mesh(eyeGeo, matRed);
+            eyeR.position.set(-0.08, 0.55, 0.48);
+            group.add(eyeR);
+            
+            const hitbox = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.8, 0.8), new THREE.MeshBasicMaterial({visible: false}));
+            hitbox.position.y = 0.4;
+            hitbox.name = "mobHitbox";
+            hitbox.userData = { parent: group, type: 'bunny' };
+            group.add(hitbox);
+            return group;
+        }
+
+        // 2. DANCING HOT DOG
+        function createHotDogMesh() {
+            const group = new THREE.Group();
+            const matBun = new THREE.MeshLambertMaterial({ color: 0xF5DEB3 }); // Wheat
+            const matMeat = new THREE.MeshLambertMaterial({ color: 0xA52A2A }); // Brown/Red
+            const matMustard = new THREE.MeshLambertMaterial({ color: 0xFFD700 }); // Gold
+            const matBlack = new THREE.MeshBasicMaterial({ color: 0x000000 });
+
+            // Sausage
+            const sausage = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.9, 0.3), matMeat);
+            sausage.position.y = 0.6;
+            group.add(sausage);
+
+            // Buns
+            const bunL = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.8, 0.35), matBun);
+            bunL.position.set(0.2, 0.6, 0);
+            group.add(bunL);
+            const bunR = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.8, 0.35), matBun);
+            bunR.position.set(-0.2, 0.6, 0);
+            group.add(bunR);
+
+            // Mustard
+            const mustard = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.8, 0.05), matMustard);
+            mustard.position.set(0, 0.6, 0.16);
+            group.add(mustard);
+
+            // Sunglasses
+            const glasses = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.1, 0.05), matBlack);
+            glasses.position.set(0, 0.8, 0.18);
+            group.add(glasses);
+
+            // Limbs (Arms/Legs) - Stick style
+            const limbGeo = new THREE.BoxGeometry(0.05, 0.3, 0.05);
+            
+            const armL = new THREE.Mesh(limbGeo, matBun);
+            armL.position.set(0.35, 0.7, 0);
+            armL.rotation.z = -0.5;
+            group.add(armL);
+
+            const armR = new THREE.Mesh(limbGeo, matBun);
+            armR.position.set(-0.35, 0.7, 0);
+            armR.rotation.z = 0.5;
+            group.add(armR);
+
+            const legL = new THREE.Mesh(limbGeo, matBun);
+            legL.position.set(0.1, 0.15, 0);
+            group.add(legL);
+
+            const legR = new THREE.Mesh(limbGeo, matBun);
+            legR.position.set(-0.1, 0.15, 0);
+            group.add(legR);
+
+            const hitbox = new THREE.Mesh(new THREE.BoxGeometry(0.8, 1.2, 0.8), new THREE.MeshBasicMaterial({visible: false}));
+            hitbox.position.y = 0.6;
+            hitbox.name = "mobHitbox";
+            hitbox.userData = { parent: group, type: 'hotdog' };
+            group.add(hitbox);
+
+            return group;
+        }
+
+        function spawnInitialMobs() {
+            for(let i=0; i<MAX_BUNNIES; i++) spawnNewMob('bunny');
+            for(let i=0; i<MAX_HOTDOGS; i++) spawnNewMob('hotdog');
+        }
+
+        function spawnNewMob(type) {
+            const playerPos = controls.getObject().position;
+            
+            // Spawn radius
+            const dist = 30 + Math.random() * 40; 
+            const angle = Math.random() * Math.PI * 2;
+            
+            const x = playerPos.x + Math.cos(angle) * dist;
+            const z = playerPos.z + Math.sin(angle) * dist;
+            const y = getTerrainHeight(Math.floor(x), Math.floor(z)) + 1.5;
+
+            let mesh;
+            if (type === 'bunny') {
+                mesh = createBunnyMesh();
+                mesh.position.set(x, y, z);
+                mobGroup.add(mesh);
+                bunnies.push({
+                    mesh: mesh,
+                    health: 3,
+                    velocity: new THREE.Vector3(),
+                    jumpTimer: Math.random(),
+                    onGround: false,
+                    aggro: false,
+                    type: 'bunny',
+                    targetLight: null,
+                    lightScanTimer: 0
+                });
+            } else if (type === 'hotdog') {
+                mesh = createHotDogMesh();
+                mesh.position.set(x, y, z);
+                mobGroup.add(mesh);
+                hotdogs.push({
+                    mesh: mesh,
+                    health: 3, // Takes a few hits
+                    velocity: new THREE.Vector3(),
+                    jumpTimer: Math.random(),
+                    onGround: false,
+                    scared: false,
+                    type: 'hotdog',
+                    danceOffset: Math.random() * 100,
+                    targetLight: null,
+                    lightScanTimer: 0
+                });
+            }
+        }
+
+        function updateMobs(delta) {
+            const playerPos = controls.getObject().position;
+            document.getElementById('bunny-count').innerText = bunnies.length;
+
+            // 1. Maintain Populations
+            if (bunnies.length < MAX_BUNNIES && Math.random() < 0.01) spawnNewMob('bunny');
+            if (hotdogs.length < MAX_HOTDOGS && Math.random() < 0.005) spawnNewMob('hotdog');
+
+            // 2. Update Bunnies
+            updateBunnyLogic(delta, playerPos);
+            // 3. Update Hot Dogs
+            updateHotDogLogic(delta, playerPos);
+        }
+        
+        function findNearestLight(mobPos, range) {
+             let nearest = null;
+             let minDstSq = range * range;
+             
+             for(const key of activeLights) {
+                 const [lx, ly, lz] = key.split(',').map(Number);
+                 // Distance Check (Squared)
+                 const dx = lx - mobPos.x;
+                 const dy = ly - mobPos.y;
+                 const dz = lz - mobPos.z;
+                 const dSq = dx*dx + dy*dy + dz*dz;
+                 
+                 if (dSq < minDstSq) {
+                     minDstSq = dSq;
+                     nearest = new THREE.Vector3(lx, ly, lz);
+                 }
+             }
+             return nearest;
+        }
+
+        function updateBunnyLogic(delta, playerPos) {
+            for (let i = bunnies.length - 1; i >= 0; i--) {
+                const b = bunnies[i];
+                applyPhysics(b, delta);
+                
+                const dist = b.mesh.position.distanceTo(playerPos);
+                
+                // Light Scanning
+                b.lightScanTimer -= delta;
+                if (b.lightScanTimer <= 0) {
+                    b.lightScanTimer = 1.0 + Math.random(); // Check every second
+                    b.targetLight = findNearestLight(b.mesh.position, 20); // 20 block range
+                }
+                
+                // Aggro Overrides Light
+                if (dist < 12) {
+                    b.aggro = true;
+                    b.targetLight = null; // Forget light if angry
+                    b.mesh.lookAt(playerPos.x, b.mesh.position.y, playerPos.z);
+                } else {
+                    b.aggro = false;
+                    if (b.targetLight) {
+                         b.mesh.lookAt(b.targetLight.x, b.mesh.position.y, b.targetLight.z);
+                    }
+                }
+
+                b.jumpTimer -= delta;
+                if (b.onGround && b.jumpTimer <= 0) {
+                    b.jumpTimer = b.aggro ? 0.5 : 2.0 + Math.random();
+                    b.velocity.y = 8;
+                    b.onGround = false;
+
+                    const speed = 3.0;
+                    if (b.aggro) {
+                        const dx = playerPos.x - b.mesh.position.x;
+                        const dz = playerPos.z - b.mesh.position.z;
+                        const len = Math.sqrt(dx*dx + dz*dz);
+                        if (len > 0) {
+                            b.velocity.x = (dx/len) * speed * 1.5;
+                            b.velocity.z = (dz/len) * speed * 1.5;
+                        }
+                    } else if (b.targetLight) {
+                        // Move towards light
+                        const dx = b.targetLight.x - b.mesh.position.x;
+                        const dz = b.targetLight.z - b.mesh.position.z;
+                        const len = Math.sqrt(dx*dx + dz*dz);
+                        if (len > 1.0) { // Don't hump the block
+                             b.velocity.x = (dx/len) * speed;
+                             b.velocity.z = (dz/len) * speed;
+                        } else {
+                             b.velocity.x = 0;
+                             b.velocity.z = 0;
+                        }
+                    } else {
+                        const angle = Math.random() * Math.PI * 2;
+                        b.velocity.x = Math.cos(angle) * speed;
+                        b.velocity.z = Math.sin(angle) * speed;
+                        b.mesh.rotation.y = -angle + Math.PI/2;
+                    }
+                }
+
+                if (dist < 1.5) damagePlayer();
+                
+                if (dist > 70) {
+                    mobGroup.remove(b.mesh);
+                    bunnies.splice(i, 1);
+                }
+            }
+        }
+
+        function updateHotDogLogic(delta, playerPos) {
+            const scareRange = 15;
+            const runSpeed = 6.5; // Faster than player
+
+            for (let i = hotdogs.length - 1; i >= 0; i--) {
+                const h = hotdogs[i];
+                applyPhysics(h, delta);
+
+                const dist = h.mesh.position.distanceTo(playerPos);
+
+                // Light Scanning
+                h.lightScanTimer -= delta;
+                if (h.lightScanTimer <= 0) {
+                    h.lightScanTimer = 1.0 + Math.random();
+                    h.targetLight = findNearestLight(h.mesh.position, 25);
+                }
+
+                // Dancing Animation (Idle OR Near Light)
+                let isDancing = false;
+                if (!h.scared && h.onGround) {
+                     if (h.targetLight) {
+                         // Dance near light
+                         const dToLight = h.mesh.position.distanceTo(h.targetLight);
+                         if (dToLight < 3) isDancing = true;
+                     } else {
+                         // Random dance occasionally? No, mostly idle
+                         isDancing = true;
+                     }
+                }
+                
+                if (isDancing) {
+                    h.mesh.rotation.z = Math.sin(performance.now() * 0.01 + h.danceOffset) * 0.2;
+                    if (h.targetLight) {
+                        // Spin fast if loving light
+                        h.mesh.rotation.y += delta * 5;
+                    } else {
+                        h.mesh.rotation.y += delta;
+                    }
+                } else {
+                    h.mesh.rotation.z = 0;
+                }
+
+                // Scare Logic (Overrides Light)
+                if (dist < scareRange) {
+                    h.scared = true;
+                    h.targetLight = null; // Forget light, run!
+                    // Look AWAY from player
+                    h.mesh.lookAt(2 * h.mesh.position.x - playerPos.x, h.mesh.position.y, 2 * h.mesh.position.z - playerPos.z);
+                } else if (dist > scareRange * 2) {
+                    h.scared = false;
+                }
+
+                h.jumpTimer -= delta;
+                if (h.onGround && h.jumpTimer <= 0) {
+                    if (h.scared) {
+                        // RUN AWAY
+                        h.jumpTimer = 0.3; // Hop fast
+                        h.velocity.y = 6;
+                        h.onGround = false;
+                        
+                        const dx = h.mesh.position.x - playerPos.x; // Vector pointing away
+                        const dz = h.mesh.position.z - playerPos.z;
+                        const len = Math.sqrt(dx*dx + dz*dz);
+                        if (len > 0) {
+                            h.velocity.x = (dx/len) * runSpeed;
+                            h.velocity.z = (dz/len) * runSpeed;
+                        }
+                    } else if (h.targetLight) {
+                        // Run to light!
+                         const dx = h.targetLight.x - h.mesh.position.x;
+                         const dz = h.targetLight.z - h.mesh.position.z;
+                         const len = Math.sqrt(dx*dx + dz*dz);
+                         if (len > 1.5) {
+                              h.jumpTimer = 0.5;
+                              h.velocity.y = 6;
+                              h.onGround = false;
+                              h.velocity.x = (dx/len) * runSpeed;
+                              h.velocity.z = (dz/len) * runSpeed;
+                              h.mesh.lookAt(h.targetLight.x, h.mesh.position.y, h.targetLight.z);
+                         } else {
+                              // Arrived at light
+                              h.velocity.x = 0;
+                              h.velocity.z = 0;
+                              // Just chill here
+                         }
+                    } else {
+                        // Just chill/dance, maybe small hop
+                        h.jumpTimer = 1.0 + Math.random() * 2.0;
+                        if (Math.random() > 0.5) {
+                            h.velocity.y = 5;
+                            h.onGround = false;
+                            // Random small move
+                            const angle = Math.random() * Math.PI * 2;
+                            h.velocity.x = Math.cos(angle) * 2;
+                            h.velocity.z = Math.sin(angle) * 2;
+                        }
+                    }
+                }
+
+                // Despawn far away
+                if (dist > 90) {
+                    mobGroup.remove(h.mesh);
+                    hotdogs.splice(i, 1);
+                }
+            }
+        }
+
+        function applyPhysics(mob, delta) {
+            mob.velocity.y -= GRAVITY * delta;
+            mob.mesh.position.addScaledVector(mob.velocity, delta);
+
+            if (mob.onGround) {
+                mob.velocity.x *= 0.8;
+                mob.velocity.z *= 0.8;
+            }
+
+            const terrainH = getTerrainHeight(Math.floor(mob.mesh.position.x), Math.floor(mob.mesh.position.z));
+            
+            // Ground Collision
+            if (mob.mesh.position.y < terrainH + 0.5) {
+                mob.mesh.position.y = terrainH + 0.5;
+                mob.velocity.y = 0;
+                mob.onGround = true;
+            } else {
+                // Check block collision
+                if (checkPlayerCollision(mob.mesh.position.x, mob.mesh.position.y, mob.mesh.position.z)) {
+                    mob.mesh.position.y += 0.1;
+                    mob.onGround = true;
+                    mob.velocity.y = 0;
+                } else {
+                    mob.onGround = false;
+                }
+            }
+        }
+
+        function damagePlayer() {
+            const now = performance.now();
+            if (now - lastHitTime > 1000) { 
+                lastHitTime = now;
+                playerHealth -= 10;
+                updateHealthUI();
+                
+                const overlay = document.getElementById('damage-overlay');
+                overlay.style.opacity = 1;
+                setTimeout(() => overlay.style.opacity = 0, 200);
+
+                velocity.y = 5;
+                velocity.x += (Math.random()-0.5)*10;
+                velocity.z += (Math.random()-0.5)*10;
+
+                if (playerHealth <= 0) {
+                    alert("GAME OVER!");
+                    resetWorld();
+                }
+            }
+        }
+        
+        function healPlayer(amount) {
+            playerHealth = Math.min(100, playerHealth + amount);
+            updateHealthUI();
+            const overlay = document.getElementById('heal-overlay');
+            overlay.style.opacity = 1;
+            setTimeout(() => overlay.style.opacity = 0, 400);
+        }
+
+        function updateHealthUI() {
+            document.getElementById('hp-val').innerText = playerHealth;
+            document.getElementById('health-bar').style.width = playerHealth + '%';
         }
 
         // --- Texture Generation ---
@@ -781,6 +1286,15 @@
             return Math.floor(h1 + h2 + h3);
         }
 
+        // Simple pseudo-random function for tree placement based on coordinates and seed
+        function pseudoRandom(x, z) {
+            const sx = x + seedOffset.x;
+            const sz = z + seedOffset.z;
+            // A simple hashing-like mechanism using sin to get a value between 0 and 1
+            let val = Math.sin(sx * 12.9898 + sz * 78.233) * 43758.5453;
+            return val - Math.floor(val); 
+        }
+
         // --- Mod Logic ---
         function getChunkKeyFromCoords(x, z) {
             const cx = Math.floor(x / CHUNK_SIZE);
@@ -808,6 +1322,12 @@
 
             const entry = { type: type, mesh: null };
             worldData.set(key, entry);
+            
+            // NEW: Track glowstone for mob AI
+            if (type === 'glowstone') {
+                activeLights.add(key);
+            }
+
             if (renderNow) {
                 return renderBlock(x, y, z, entry);
             }
@@ -854,10 +1374,7 @@
             const chunkKey = `${cx},${cz}`;
             const mods = chunkMods.get(chunkKey);
 
-            // Helper to check transparency/air in neighbors (for visibility culling)
-            // Returns true if the block at nx,ny,nz is Air (either naturally or via mod)
             const isTransparent = (nx, ny, nz) => {
-                // 1. Check mods first
                 const nCk = getChunkKeyFromCoords(nx, nz);
                 if (chunkMods.has(nCk)) {
                     const nm = chunkMods.get(nCk);
@@ -865,21 +1382,19 @@
                     if (nm.has(nk)) {
                          const t = nm.get(nk);
                          if (t === 'air' || t === 'glass') return true;
-                         return false; // It is a solid block mod
+                         return false;
                     }
                 }
                 
-                // 2. Check natural generation
                 const nh = getTerrainHeight(nx, nz);
-                if (ny > nh) return true; // Naturally air
-                return false; // Naturally stone/dirt
+                if (ny > nh) return true; 
+                return false; 
             };
 
             for (let x = startX; x < startX + CHUNK_SIZE; x++) {
                 for (let z = startZ; z < startZ + CHUNK_SIZE; z++) {
                     const h = getTerrainHeight(x, z);
                     
-                    // 1. Generate Terrain
                     for (let y = h; y >= -WORLD_DEPTH; y--) {
                         const blockKey = `${x},${y},${z}`;
                         let type = 'stone';
@@ -895,12 +1410,10 @@
 
                         if (type === 'air') continue;
 
-                        // Visibility Culling
                         let exposed = false;
                         if (y === h) exposed = true;
-                        else if (mods && mods.has(blockKey)) exposed = true; // Always show user blocks
+                        else if (mods && mods.has(blockKey)) exposed = true; 
                         else {
-                             // Check neighbors for Air (Natural OR Modded)
                              if (isTransparent(x+1, y, z)) exposed = true;
                              else if (isTransparent(x-1, y, z)) exposed = true;
                              else if (isTransparent(x, y, z+1)) exposed = true;
@@ -913,18 +1426,19 @@
                         if (mesh) chunkBlocks.push(mesh);
                     }
 
-                    // 2. Trees
+                    // Trees
                     const treeKey = `${x},${h+1},${z}`;
                     let allowTree = true;
                     if (mods && mods.has(treeKey) && mods.get(treeKey) !== 'wood') allowTree = false;
 
-                    if (allowTree && Math.abs(x * 37 + z * 13) % 100 < 2) {
+                    // Use pseudoRandom for more random tree placement
+                    // Reduced density by 15% (from 0.02 down to 0.017)
+                    if (allowTree && pseudoRandom(x, z) < 0.017) {
                         createTree(x, h + 1, z, mods);
                     }
                 }
             }
             
-            // 3. Create User-Added Blocks OUTSIDE the terrain loop
             if (mods) {
                 for (const [blockKey, type] of mods) {
                     if (type === 'air') continue;
@@ -983,7 +1497,6 @@
                 }
             }
             
-            // Garbage collection
             for (const [key, blocks] of chunks) {
                 if (!activeKeys.has(key)) {
                     if (Array.isArray(blocks)) {
@@ -993,7 +1506,13 @@
                                 const bx = block.position.x;
                                 const by = block.position.y;
                                 const bz = block.position.z;
-                                worldData.delete(getBlockKey(bx, by, bz));
+                                const k = getBlockKey(bx, by, bz);
+                                // NEW: Check if removing glowstone from unloaded chunk
+                                const data = worldData.get(k);
+                                if (data && data.type === 'glowstone') {
+                                    activeLights.delete(k);
+                                }
+                                worldData.delete(k);
                             }
                         });
                     }
@@ -1001,10 +1520,9 @@
                 }
             }
             
-            document.getElementById('chunkCount').innerText = chunks.size;
+            // document.getElementById('chunkCount').innerText = chunks.size;
         }
 
-        // ... Init Toolbar & Icons (Same as before) ...
         function initToolbar() {
             const toolbar = document.getElementById('toolbar');
             toolbar.innerHTML = ''; 
@@ -1037,26 +1555,26 @@
             iconCamera.lookAt(0, 0, 0);
             const light = new THREE.AmbientLight(0xffffff, 1.0);
             iconScene.add(light);
-            // Use shared geometry for icons too
             const mesh = new THREE.Mesh(sharedBlockGeometry.clone().scale(0.8, 0.8, 0.8), materials[blockType]);
             iconScene.add(mesh);
             renderer.render(iconScene, iconCamera);
         }
 
         function init() {
-            // Set Near Clipping Plane to 0.05 to reduce "seeing through walls" in tight spaces
             camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.05, 1000);
             
             scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x87CEEB); // Initialize background
+            scene.background = new THREE.Color(0x87CEEB); 
             scene.fog = new THREE.Fog(0x87CEEB, 20, (RENDER_DISTANCE * CHUNK_SIZE) - 5);
 
             blockGroup = new THREE.Group();
             transparentBlockGroup = new THREE.Group();
+            mobGroup = new THREE.Group();
+            
             scene.add(blockGroup);
             scene.add(transparentBlockGroup);
+            scene.add(mobGroup);
 
-            // Define Global Lights
             ambientLight = new THREE.HemisphereLight(0xeeeeff, 0x777788, 0.8);
             ambientLight.position.set(0.5, 1, 0.75);
             scene.add(ambientLight);
@@ -1080,16 +1598,15 @@
             initSky();
             initToolbar();
             
-            updateChunks(); // Generates world
+            updateChunks(); 
+            spawnInitialMobs();
 
             raycaster = new THREE.Raycaster();
-            // OPTIMIZATION: Limit raycast distance significantly
-            raycaster.far = 8; 
+            raycaster.far = 6; 
             
             document.addEventListener('keydown', onKeyDown);
             document.addEventListener('keyup', onKeyUp);
             
-            // REPLACED Click with MouseDown/Up for continuous action
             document.addEventListener('mousedown', onMouseDown);
             document.addEventListener('mouseup', onMouseUp);
             
@@ -1112,7 +1629,7 @@
                     moveUp = true; 
                     break;
                 case 'ShiftLeft': case 'ShiftRight': moveDown = true; break;
-                case 'KeyF': toggleFlying(); break;
+                case 'KeyF': toggleFlying(); break; // Re-enabled!
             }
             
             if (event.key >= '1' && event.key <= '9') {
@@ -1134,15 +1651,20 @@
 
         function toggleFlying() {
             isFlying = !isFlying;
-            document.getElementById('isFlying').innerText = isFlying ? 'Yes' : 'No';
             velocity.y = 0; 
+            const status = document.getElementById('fly-status');
+            if(isFlying) {
+                status.innerText = "ON";
+                status.style.color = "#00FF00";
+            } else {
+                status.innerText = "OFF";
+                status.style.color = "yellow";
+            }
         }
 
         function selectBlock(index) {
             currentBlockIndex = index;
             const type = blockTypes[index];
-            currentBlockType = type;
-            
             const name = type.replace('_', ' ');
             document.getElementById('blockName').innerText = name.charAt(0).toUpperCase() + name.slice(1);
             
@@ -1161,7 +1683,6 @@
             if (event.button === 0) {
                 isLeftMouseDown = true;
                 isMining = true; // Start anim
-                // Instant action if not cooling down
                 if (actionCooldown <= 0) {
                     performAction(0);
                     actionCooldown = ACTION_DELAY;
@@ -1185,7 +1706,61 @@
         // Consolidated action logic
         function performAction(button) {
             raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
-            // Re-fetch objects as scene changes
+            
+            if (button === 0) {
+                // Attack Check First
+                // Raycast against mobs
+                const mobIntersects = raycaster.intersectObjects(mobGroup.children, true);
+                if (mobIntersects.length > 0 && mobIntersects[0].distance < 4) {
+                    const hitObj = mobIntersects[0].object;
+                    
+                    // Find parent wrapper
+                    let hitWrapper = hitObj;
+                    while(hitWrapper.parent && hitWrapper.parent !== mobGroup) {
+                        hitWrapper = hitWrapper.parent;
+                    }
+                    
+                    // Check Bunnies
+                    const bunnyData = bunnies.find(b => b.mesh === hitWrapper);
+                    if (bunnyData) {
+                        bunnyData.health--;
+                        createParticles(mobIntersects[0].point, 0xff0000);
+                        bunnyData.velocity.add(controls.getDirection(new THREE.Vector3()).multiplyScalar(10));
+                        bunnyData.velocity.y = 5;
+                        bunnyData.aggro = true;
+                        hitWrapper.traverse(c => {
+                           if (c.material && c.material.emissive) {
+                               const old = c.material.emissive.getHex();
+                               c.material.emissive.setHex(0xff0000);
+                               setTimeout(() => { if(c.material) c.material.emissive.setHex(old); }, 100);
+                           } 
+                        });
+                        if (bunnyData.health <= 0) {
+                            mobGroup.remove(hitWrapper);
+                            bunnies = bunnies.filter(b => b !== bunnyData);
+                        }
+                        return; 
+                    }
+
+                    // Check Hot Dogs
+                    const hotdogData = hotdogs.find(h => h.mesh === hitWrapper);
+                    if (hotdogData) {
+                        hotdogData.health--;
+                        createParticles(mobIntersects[0].point, 0xFFD700); // Gold particles
+                        hotdogData.velocity.add(controls.getDirection(new THREE.Vector3()).multiplyScalar(12));
+                        hotdogData.velocity.y = 6;
+                        hotdogData.scared = true;
+                        
+                        if (hotdogData.health <= 0) {
+                            mobGroup.remove(hitWrapper);
+                            hotdogs = hotdogs.filter(h => h !== hotdogData);
+                            healPlayer(25); // REWARD
+                        }
+                        return;
+                    }
+                }
+            }
+
             const objects = [...blockGroup.children, ...transparentBlockGroup.children];
             const intersections = raycaster.intersectObjects(objects);
 
@@ -1198,23 +1773,25 @@
                 const bz = intersect.object.position.z;
 
                 if (button === 0) { // Mine
-                    // Particles
                     createParticles(intersect.object.position, intersect.object.material.color || intersect.object.material[2].color || 0x888888);
 
-                    // FIX: Guaranteed removal of the object clicked
                     const clickedMesh = intersect.object;
                     if (clickedMesh.parent) {
                         clickedMesh.parent.remove(clickedMesh);
                     }
 
-                    // Logic: Clear data and Record Mod
                     const entry = getBlockData(bx, by, bz);
                     if (entry) {
+                        // NEW: Remove from active lights if mining glowstone
+                        if (entry.type === 'glowstone') {
+                            activeLights.delete(getBlockKey(bx, by, bz));
+                        }
+                        
                         if (entry.mesh && entry.mesh !== clickedMesh && entry.mesh.parent) {
                              entry.mesh.parent.remove(entry.mesh);
                         }
                         worldData.delete(getBlockKey(bx, by, bz)); 
-                        recordModification(bx, by, bz, 'air'); // Record removal
+                        recordModification(bx, by, bz, 'air'); 
                     }
                     
                     revealNeighbors(bx, by, bz);
@@ -1233,8 +1810,8 @@
                     const z = Math.round(newPos.z);
                     
                     if (!hasBlockData(x, y, z)) {
-                        createBlock(x, y, z, currentBlockType, true);
-                        recordModification(x, y, z, currentBlockType); // Record Add
+                        createBlock(x, y, z, blockTypes[currentBlockIndex], true);
+                        recordModification(x, y, z, blockTypes[currentBlockIndex]); 
                     }
                 }
             }
@@ -1270,31 +1847,27 @@
 
             if (controls.enabled) {
                 updateChunks(); 
-                updateContinuousActions(delta); // Handle holding mouse buttons
+                updateContinuousActions(delta); 
                 skyMesh.position.copy(controls.getObject().position);
                 animatePickaxe(delta);
                 updateParticles(delta);
                 
+                updateMobs(delta);
+                
                 // Dynamic Lighting Update
                 const playerY = controls.getObject().position.y;
                 
-                // New Darkness Logic:
-                // Starts fading at Y=4 (just below average surface peaks)
-                // Reaches maximum darkness at Y=-12 (very shallow cave)
                 let depthFactor = 0;
-                // Only darken if BELOW surface level
                 if (playerY < 4) {
                     depthFactor = (playerY - 4) / -16; 
                     depthFactor = Math.max(0, Math.min(1, depthFactor)); 
                 }
 
-                // Target darkness is 96% (almost pitch black)
                 const brightness = 1.0 - (depthFactor * 0.96);
 
                 ambientLight.intensity = 0.8 * brightness;
                 dirLight.intensity = 0.6 * brightness;
 
-                // Fog & Background - Turn to black to hide rendering glitches in caves
                 const baseColor = new THREE.Color(0x87CEEB);
                 const blackColor = new THREE.Color(0x000000);
                 const currentColor = baseColor.clone().lerp(blackColor, depthFactor); 
@@ -1302,8 +1875,6 @@
                 scene.fog.color.copy(currentColor).multiplyScalar(brightness);
                 scene.background.copy(currentColor).multiplyScalar(brightness);
 
-                // Hide SkyMesh quickly when underground to prevent "seeing outside"
-                // Hiding at -5 ensures that even if walls fail to render, you see the black background
                 if (playerY < -5) {
                     skyMesh.visible = false;
                 } else {
@@ -1344,7 +1915,6 @@
                 
                 // 1. Try Moving X
                 playerObj.translateX(-velocity.x * delta);
-                // REMOVED !isFlying check to enable collision while flying
                 if (checkPlayerCollision(playerObj.position.x, playerObj.position.y, playerObj.position.z)) {
                     if (!checkPlayerCollision(playerObj.position.x, playerObj.position.y + 1, playerObj.position.z)) {
                          playerObj.position.y += 1.0;
@@ -1358,7 +1928,6 @@
                 // 2. Try Moving Z
                 const posAfterX = playerObj.position.clone();
                 playerObj.translateZ(velocity.z * delta);
-                // REMOVED !isFlying check to enable collision while flying
                 if (checkPlayerCollision(playerObj.position.x, playerObj.position.y, playerObj.position.z)) {
                     if (!checkPlayerCollision(playerObj.position.x, playerObj.position.y + 1, playerObj.position.z)) {
                         playerObj.position.y += 1.0;
@@ -1371,7 +1940,6 @@
 
                 // 3. Try Moving Y
                 playerObj.position.y += (velocity.y * delta);
-                // REMOVED !isFlying check to enable collision while flying
                 if (checkPlayerCollision(playerObj.position.x, playerObj.position.y, playerObj.position.z)) {
                     if (velocity.y < 0) {
                         canJump = true;
@@ -1386,6 +1954,8 @@
                 if (playerObj.position.y < -100 && !isFlying) {
                     velocity.y = 0;
                     playerObj.position.y = 50;
+                    playerHealth -= 20;
+                    updateHealthUI();
                 }
             }
 
